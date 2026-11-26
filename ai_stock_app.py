@@ -33,7 +33,7 @@ def run_streamlit_app():
         layout="wide"
     )
 
-    st.title("📈 AI 일봉 데이터 기반 다음 날 상승 유망 종목 추천 앱")
+    st.title("📈 상승 유망 종목 추천")
     st.caption("KRX 일별 시세 및 기술적 지표(RandomForest)를 학습한 결과 기반 조회 전용 대시보드입니다.")
 
     # 사이드바: 정보 안내 (학습 버튼 제거됨)
