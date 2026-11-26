@@ -390,11 +390,14 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
 def git_auto_push():
     print("\n🚀 깃허브로 결과 파일 자동 업로드 중...")
     try:
-        # -f 옵션을 추가하여 .gitignore의 영향을 받지 않고 results 폴더의 CSV만 강제 업로드
-        subprocess.run(["git", "add", "-f", "multi_stock_results/results/*.csv"], check=True)
+        # 1. results 폴더의 변경된 파일 추가 (서브모듈 충돌 방지를 위해 경로 지정 주의)
+        subprocess.run(["git", "add", "multi_stock_results/results/*.csv"], check=True)
         
+        # 2. 변경된 내용이 없더라도 에러 없이 넘어가도록 --allow-empty 추가
         today = datetime.now().strftime("%Y-%m-%d")
-        subprocess.run(["git", "commit", "-m", f"Auto-update stock analysis results: {today}"], check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", f"Auto-update stock analysis results: {today}"], check=True)
+        
+        # 3. 깃허브에 푸시
         subprocess.run(["git", "push", "origin", "main"], check=True)
         print("✅ 깃허브 자동 업로드 완료!")
     except subprocess.CalledProcessError as e:
