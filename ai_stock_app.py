@@ -45,7 +45,7 @@ def run_streamlit_app():
            ```bash
            python ai_stock_app.py --analyze
            ```
-        2. 생성된 결과 파일을 업로드해 주세요.
+        2. 생성된 결과 파일을 깃허브 레포지토리의 동일한 경로에 업로드해 주세요.
         """)
         return
 
@@ -133,8 +133,7 @@ def run_streamlit_app():
                 "Close": "현재가(원)",
                 "Signal": "AI 시그널"
             }),
-            width="stretch",
-            hide_Image=True if "hide_Image" in dir(st) else False, # 호환성 유지
+            use_container_width=True,
             hide_index=True
         )
 
@@ -158,7 +157,7 @@ def run_streamlit_app():
             top_metrics = metrics_df.sort_values("AI_Return", ascending=False).head(20)
             st.dataframe(
                 top_metrics[["Ticker", "Name", "Market", "AI 수익률(%)", "단순보유 수익률(%)", "최대낙폭 MDD(%)", "정확도(%)"]],
-                width="stretch",
+                use_container_width=True,
                 hide_index=True
             )
         else:
@@ -177,7 +176,7 @@ def run_streamlit_app():
 
         st.dataframe(
             res[["Ticker", "Name", "Market", "Date", "Close", "상승확률(%)", "Signal"]],
-            width="stretch",
+            use_container_width=True,
             hide_index=True
         )
 
