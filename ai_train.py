@@ -38,7 +38,7 @@ BUY_THRESHOLD = 0.55
 SELL_THRESHOLD = 0.45
 MIN_TRAIN_YEARS = 5
 N_ESTIMATORS = 100
-MAX_STOCKS = 30  # 전체 종목 분석 시 None, 테스트 시 숫자로 지정 (예: 30)
+MAX_STOCKS = None  # 전체 종목 분석 시 None, 테스트 시 숫자로 지정 (예: 30)
 HOLDINGS = set()
 REQUEST_DELAY = 0.5
 

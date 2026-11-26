@@ -34,16 +34,7 @@ def run_streamlit_app():
     )
 
     st.title("📈 상승 유망 종목 추천")
-    st.caption("KRX 일별 시세 및 기술적 지표(RandomForest)를 학습한 결과 기반 조회 전용 대시보드입니다.")
-
-    # 사이드바: 정보 안내 (학습 버튼 제거됨)
-    with st.sidebar:
-        st.header("📌 앱 정보")
-        st.info("이 앱은 조회 전용 모드로 동작합니다.\n\n최신 데이터 분석 및 학습은 로컬 PC에서 `--analyze` 명령어로 진행 후 결과 파일을 업로드해 주세요.")
-        
-        st.divider()
-        st.markdown("**모델 사양**")
-        st.code("모델: RandomForest\n매수 기준: >= 55.0%\n매도 기준: <= 45.0%")
+    st.caption("KRX 일별 시세 및 기술적 지표(RandomForest)를 학습한 결과 기반 대시보드입니다.")
 
     # 결과 파일 존재 여부 확인
     if not SIGNALS_FILE.exists():
@@ -54,7 +45,7 @@ def run_streamlit_app():
            ```bash
            python ai_stock_app.py --analyze
            ```
-        2. 생성된 `multi_stock_results/results/` 폴더 안의 핵심 CSV 파일들을 깃허브 레포지토리의 동일한 경로에 업로드해 주세요.
+        2. 생성된 결과 파일을 업로드해 주세요.
         """)
         return
 
@@ -62,6 +53,46 @@ def run_streamlit_app():
     signals = pd.read_csv(SIGNALS_FILE, dtype={"Ticker": str})
     signals["Ticker"] = signals["Ticker"].str.zfill(6)
     signals["상승확률(%)"] = (signals["Up_Probability"] * 100).round(2)
+
+    # 사이드바: 보유 종목 입력 기능 추가
+    with st.sidebar:
+        st.header("💼 나의 보유 종목 설정")
+        holdings_input = st.text_input(
+            "보유 종목 코드 입력 (쉼표로 구분)",
+            placeholder="예: 005930, 000660, 035420",
+            help="현재 보유 중인 종목 코드를 쉼표(,)로 구분해서 입력하면 시그널에 반영됩니다."
+        )
+        
+        # 입력된 텍스트를 파싱하여 Set으로 변환
+        user_holdings = set([x.strip() for x in holdings_input.split(",") if x.strip()])
+        
+        if user_holdings:
+            st.success(f"현재 등록된 보유 종목: {len(user_holdings)}개")
+        
+        st.divider()
+        st.markdown("**모델 사양**")
+        st.code("모델: RandomForest\n매수 기준: >= 55.0%\n매도 기준: <= 45.0%")
+
+    # 동적으로 시그널 재계산 (사용자가 입력한 보유 종목 반영)
+    BUY_THRESHOLD = 0.55
+    SELL_THRESHOLD = 0.45
+
+    def dynamic_signal(row):
+        ticker = row["Ticker"]
+        up_prob = row["Up_Probability"]
+        holding = ticker in user_holdings
+        
+        if holding and up_prob <= SELL_THRESHOLD:
+            return "매도 검토"
+        elif not holding and up_prob >= BUY_THRESHOLD:
+            return "매수 검토"
+        elif holding:
+            return "보유"
+        else:
+            return "관망"
+
+    signals["Signal"] = signals.apply(dynamic_signal, axis=1)
+    signals["보유여부"] = signals["Ticker"].isin(user_holdings)
 
     # 상단 요약 KPI 카드
     col1, col2, col3, col4 = st.columns(4)
@@ -85,7 +116,7 @@ def run_streamlit_app():
         with f_col1:
             market_filter = st.multiselect("시장 선택", ["KOSPI", "KOSDAQ"], default=["KOSPI", "KOSDAQ"])
         with f_col2:
-            signal_filter = st.multiselect("AI 시그널 필터", ["매수 검토", "보유", "관망", "매도 검토"], default=["매수 검토", "보유"])
+            signal_filter = st.multiselect("AI 시그널 필터", ["매수 검토", "보유", "관망", "매도 검토"], default=["매수 검토", "보유", "매도 검토"])
 
         filtered = signals[
             (signals["Market"].isin(market_filter)) &
@@ -103,6 +134,7 @@ def run_streamlit_app():
                 "Signal": "AI 시그널"
             }),
             width="stretch",
+            hide_Image=True if "hide_Image" in dir(st) else False, # 호환성 유지
             hide_index=True
         )
 
@@ -130,7 +162,7 @@ def run_streamlit_app():
                 hide_index=True
             )
         else:
-            st.info("백테스트 결과 파일(`portfolio_curve.csv` 또는 `backtest_by_stock.csv`)이 아직 없습니다.")
+            st.info("백테스트 결과 파일이 아직 없습니다.")
 
     with tab3:
         st.subheader("전체 분석 종목 검색")
