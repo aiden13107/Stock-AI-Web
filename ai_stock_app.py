@@ -51,8 +51,13 @@ def run_streamlit_app():
 
     # 데이터 로드
     signals = pd.read_csv(SIGNALS_FILE, dtype={"Ticker": str})
-    signals["Ticker"] = signals["Ticker"].str.zfill(6)
-    signals["상승확률(%)"] = (signals["Up_Probability"] * 100).round(2)
+    signals["상승확률(%)"] = (
+        signals["Up_Probability"] * 100
+    ).round(2)
+
+    signals["예상 상승률(%)"] = (
+        signals["Expected_Return_Pct"]
+    ).round(2)
 
     # 사이드바: 보유 종목 입력 기능 추가
     with st.sidebar:
@@ -123,7 +128,10 @@ def run_streamlit_app():
             (signals["Signal"].isin(signal_filter))
         ].head(30)
 
-        display_cols = ["Ticker", "Name", "Market", "Date", "Close", "상승확률(%)", "Signal"]
+        display_cols = [
+            "Ticker", "Name", "Market", "Date",
+            "Close", "상승확률(%)", "Signal"
+        ]
         st.dataframe(
             filtered[display_cols].rename(columns={
                 "Ticker": "종목코드",
@@ -175,7 +183,10 @@ def run_streamlit_app():
             res = signals
 
         st.dataframe(
-            res[["Ticker", "Name", "Market", "Date", "Close", "상승확률(%)", "Signal"]],
+            res[[
+                "Ticker", "Name", "Market", "Date",
+                "Close", "상승확률(%)", "Signal"
+            ]],
             use_container_width=True,
             hide_index=True
         )
