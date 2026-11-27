@@ -129,8 +129,14 @@ def run_streamlit_app():
         ].head(30)
 
         display_cols = [
-            "Ticker", "Name", "Market", "Date",
-            "Close", "상승확률(%)", "Signal"
+            "Ticker",
+            "Name",
+            "Market",
+            "Date",
+            "Close",
+            "상승확률(%)",
+            "예상 상승률(%)",
+            "Signal"
         ]
         st.dataframe(
             filtered[display_cols].rename(columns={
@@ -139,6 +145,7 @@ def run_streamlit_app():
                 "Market": "시장",
                 "Date": "기준일",
                 "Close": "현재가(원)",
+                "예상 상승률(%)": "AI 예상 상승률(%)",
                 "Signal": "AI 시그널"
             }),
             use_container_width=True,
@@ -184,8 +191,14 @@ def run_streamlit_app():
 
         st.dataframe(
             res[[
-                "Ticker", "Name", "Market", "Date",
-                "Close", "상승확률(%)", "Signal"
+                "Ticker",
+                "Name",
+                "Market",
+                "Date",
+                "Close",
+                "상승확률(%)",
+                "예상 상승률(%)",
+                "Signal"
             ]],
             use_container_width=True,
             hide_index=True
