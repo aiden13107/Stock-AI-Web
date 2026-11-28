@@ -10,10 +10,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
+import FinanceDataReader as fdr
+import yfinance as yf
 from dotenv import load_dotenv
 from pykrx import stock
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
 warnings.filterwarnings("ignore")
@@ -28,7 +29,9 @@ KRX_API_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
 
 START_DATE = "20160101"
 END_DATE = datetime.now().strftime("%Y%m%d")
-MARKETS = ["KOSPI", "KOSDAQ"]
+
+# 분석 대상 시장 설정 ("KR": 코스피/코스닥, "US": S&P 500)
+TARGET_MARKETS = ["KR", "US"]
 
 INITIAL_CASH = 10_000_000
 TRADING_COST = 0.0015
@@ -38,17 +41,14 @@ SELL_THRESHOLD = 0.45
 MIN_TRAIN_YEARS = 5
 MIN_TRAIN_ROWS = 300
 
-# 속도/성능 절충 모델
+# 모델 파라미터
 N_ESTIMATORS = 50
 MAX_DEPTH = 6
 MIN_SAMPLES_LEAF = 20
 MAX_SAMPLES = 0.8
 
-# False: 최신 신호만 계산 (빠름)
-# True : 백테스트도 실행
 RUN_BACKTEST = False
-
-MAX_STOCKS = None  # 테스트할 때 30 등으로 설정
+MAX_STOCKS = None  # 테스트 시 종목 수 제한 (전체는 None으로 설정)
 HOLDINGS = set()
 REQUEST_DELAY = 0.2
 
@@ -76,7 +76,7 @@ FEATURE_COLS = [
 
 
 # =========================================================
-# 모델
+# 모델 및 서명 생성
 # =========================================================
 def create_model():
     return RandomForestClassifier(
@@ -117,7 +117,7 @@ def model_signature():
 
 
 # =========================================================
-# 파일 저장
+# 안전한 CSV 저장
 # =========================================================
 def save_csv_safely(data, path, index=False, index_label=None):
     path = Path(path)
@@ -132,7 +132,7 @@ def save_csv_safely(data, path, index=False, index_label=None):
 
 
 # =========================================================
-# KRX 데이터 수집
+# 데이터 수집 (KRX 및 글로벌 주식 통합)
 # =========================================================
 def fetch_krx_daily_snapshot(bas_dd):
     if not KRX_API_KEY:
@@ -188,20 +188,25 @@ def fetch_krx_daily_snapshot(bas_dd):
 
 
 def get_all_tickers():
-    import FinanceDataReader as fdr
-
     listings = []
-    for market in MARKETS:
+    for market in TARGET_MARKETS:
         try:
-            listing = fdr.StockListing(market)
-            if listing.empty:
-                continue
-
-            part = listing[["Code", "Name"]].copy()
-            part["Market"] = market
-            part["Code"] = part["Code"].astype(str).str.zfill(6)
-            listings.append(part)
-
+            if market == "KR":
+                for sub in ["KOSPI", "KOSDAQ"]:
+                    listing = fdr.StockListing(sub)
+                    if listing.empty:
+                        continue
+                    part = listing[["Code", "Name"]].copy()
+                    part["Market"] = sub
+                    part["Code"] = part["Code"].astype(str).str.zfill(6)
+                    listings.append(part)
+            elif market == "US":
+                listing = fdr.StockListing("S&P500")
+                if not listing.empty:
+                    part = listing[["Symbol", "Name"]].copy()
+                    part = part.rename(columns={"Symbol": "Code"})
+                    part["Market"] = "US"
+                    listings.append(part)
         except Exception as error:
             print(f"{market} 종목 목록 오류: {error}")
 
@@ -213,8 +218,10 @@ def get_all_tickers():
     )
 
 
-def get_stock_data(ticker, krx_today_df=None):
-    cache_file = CACHE_DIR / f"{ticker}.csv"
+
+def get_stock_data(ticker, market, krx_today_df=None):
+    safe_ticker = ticker.replace("^", "_").replace(".", "_")
+    cache_file = CACHE_DIR / f"{market}_{safe_ticker}.csv"
 
     try:
         old_data = (
@@ -225,48 +232,92 @@ def get_stock_data(ticker, krx_today_df=None):
     except Exception:
         old_data = pd.DataFrame()
 
-    # 캐시 마지막 날짜부터 다시 조회해 마지막 거래일 수정 데이터도 반영
-    fetch_start = (
-        old_data.index.max().strftime("%Y%m%d")
-        if not old_data.empty
-        else START_DATE
-    )
+    # 날짜 형식 통일
+    if not old_data.empty:
+        fetch_start = (
+            old_data.index.max() + pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+    else:
+        fetch_start = datetime.strptime(
+            START_DATE, "%Y%m%d"
+        ).strftime("%Y-%m-%d")
 
     try:
-        new_data = stock.get_market_ohlcv_by_date(
-            fetch_start, END_DATE, ticker
+        if market in ["KOSPI", "KOSDAQ"]:
+
+            # 국내 주식
+            new_data = stock.get_market_ohlcv_by_date(
+                fetch_start.replace("-", ""),
+                END_DATE,
+                ticker
+            )
+
+            if not new_data.empty:
+                new_data = new_data.rename(columns={
+                    "시가": "Open",
+                    "고가": "High",
+                    "저가": "Low",
+                    "종가": "Close",
+                    "거래량": "Volume"
+                })[["Open", "High", "Low", "Close", "Volume"]]
+
+        else:
+
+            # 미국 주식
+            end_date = datetime.now().strftime("%Y-%m-%d")
+
+            new_data = yf.download(
+                ticker,
+                start=fetch_start,
+                end=end_date,
+                auto_adjust=False,
+                progress=False,
+                threads=False
+            )
+
+            if not new_data.empty:
+
+                if isinstance(new_data.columns, pd.MultiIndex):
+                    new_data.columns = new_data.columns.get_level_values(0)
+
+                new_data = new_data[
+                    ["Open", "High", "Low", "Close", "Volume"]
+                ].copy()
+
+            else:
+                new_data = pd.DataFrame()
+
+        # 기존 데이터와 신규 데이터 결합
+        data = (
+            new_data if old_data.empty
+            else pd.concat([old_data, new_data])
         )
 
-        if not new_data.empty:
-            new_data = new_data.rename(columns={
-                "시가": "Open",
-                "고가": "High",
-                "저가": "Low",
-                "종가": "Close",
-                "거래량": "Volume"
-            })[["Open", "High", "Low", "Close", "Volume"]]
-
-            data = (
-                new_data if old_data.empty
-                else pd.concat([old_data, new_data])
-            )
-        else:
-            data = old_data
-
-        if krx_today_df is not None and not krx_today_df.empty:
+        # 국내 KRX 당일 데이터 반영
+        if (
+            market in ["KOSPI", "KOSDAQ"]
+            and krx_today_df is not None
+            and not krx_today_df.empty
+        ):
             today_row = krx_today_df[
                 krx_today_df["Ticker"] == ticker
             ]
+
             if not today_row.empty:
                 today_row = today_row.set_index("Date")[
                     ["Open", "High", "Low", "Close", "Volume"]
                 ]
+
                 data = pd.concat([data, today_row])
 
         if data.empty:
             return None
 
-        data = data[~data.index.duplicated(keep="last")].sort_index()
+        # 중복 날짜 제거 및 정렬
+        data = data[
+            ~data.index.duplicated(keep="last")
+        ].sort_index()
+
         data = data[
             (data["Open"] > 0) &
             (data["Close"] > 0) &
@@ -275,10 +326,12 @@ def get_stock_data(ticker, krx_today_df=None):
         ]
 
         save_csv_safely(data, cache_file, index=True)
+
         return data
 
     except Exception as error:
         print(f"데이터 수집 오류 ({ticker}): {error}")
+
         return old_data if not old_data.empty else None
 
 
@@ -304,12 +357,8 @@ def make_features(data):
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(
-        alpha=1 / 14, adjust=False, min_periods=14
-    ).mean()
-    avg_loss = loss.ewm(
-        alpha=1 / 14, adjust=False, min_periods=14
-    ).mean()
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
@@ -323,17 +372,12 @@ def make_features(data):
     df["Volatility_20"] = df["Return_1"].rolling(20).std()
     df["Volatility_60"] = df["Return_1"].rolling(60).std()
     df["Volume_Change"] = df["Volume"].pct_change()
-    df["Volume_Ratio"] = (
-        df["Volume"] / df["Volume"].rolling(20).mean()
-    )
+    df["Volume_Ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
 
     df["Daily_Range"] = (df["High"] - df["Low"]) / df["Close"]
     df["Open_Close_Ratio"] = df["Close"] / df["Open"] - 1
 
-    # t일 신호로 t+1 시가 매수, t+2 시가 매도 가정
-    df["Target_Return"] = (
-        df["Open"].shift(-2) / df["Open"].shift(-1) - 1
-    )
+    df["Target_Return"] = df["Open"].shift(-2) / df["Open"].shift(-1) - 1
     df["Target"] = (df["Target_Return"] > 0).astype(np.int8)
 
     features = df[FEATURE_COLS].replace([np.inf, -np.inf], np.nan)
@@ -356,7 +400,7 @@ def make_features(data):
 
 
 # =========================================================
-# 백테스트
+# 백테스트 함수
 # =========================================================
 def backtest_stock(trainable):
     data = trainable.copy()
@@ -424,10 +468,6 @@ def backtest_stock(trainable):
 
 
 def get_cached_backtest(ticker, trainable):
-    """
-    같은 종목/데이터 끝 날짜/행 수/모델 설정이면 기존 백테스트 재사용.
-    데이터가 늘어나거나 설정이 바뀌면 다시 계산.
-    """
     cache_file = BACKTEST_CACHE_DIR / f"{ticker}.csv"
     metadata_file = BACKTEST_CACHE_DIR / f"{ticker}.json"
 
@@ -464,7 +504,7 @@ def get_cached_backtest(ticker, trainable):
 
 
 # =========================================================
-# 메인 분석
+# 메인 분석 파이프라인
 # =========================================================
 def run_analysis_pipeline(max_stocks=MAX_STOCKS):
     tickers = get_all_tickers()
@@ -477,12 +517,11 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
         tickers = tickers.head(max_stocks)
 
     total = len(tickers)
-    print(f"분석 대상 종목: {total}개")
+    print(f"분석 대상 종목: {total}개 (KR + US 통합)")
     print(f"백테스트 실행: {RUN_BACKTEST}")
 
     krx_today_df = fetch_krx_daily_snapshot(END_DATE)
 
-    # 기존 신호 로드
     signal_dict = {}
     if SIGNALS_FILE.exists():
         try:
@@ -491,24 +530,23 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
             )
             if not old_signals.empty:
                 for _, row in old_signals.iterrows():
-                    signal_dict[str(row["Ticker"]).zfill(6)] = row.to_dict()
+                    signal_dict[str(row["Ticker"])] = row.to_dict()
         except Exception as error:
             print(f"기존 신호 로드 오류: {error}")
 
     backtest_results = []
-    today_str = datetime.now().strftime("%Y-%m-%d")
 
     for i, row in enumerate(tickers.itertuples(index=False), start=1):
-        ticker = str(row.Code).zfill(6)
+        ticker = str(row.Code)
         name = row.Name
         market = row.Market
 
-        print(f"[{i}/{total}] {name} ({ticker}) 분석")
+        print(f"[{i}/{total}] {name} ({ticker} / {market}) 분석")
 
         start_time = time.time()
 
         try:
-            data = get_stock_data(ticker, krx_today_df)
+            data = get_stock_data(ticker, market, krx_today_df)
             if data is None or len(data) < 400:
                 print("  데이터 부족")
                 continue
@@ -524,46 +562,23 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
                 print("  Target 클래스 부족")
                 continue
 
-            # 최신 신호 학습
-            X_train = trainable[FEATURE_COLS].to_numpy(
-                dtype=np.float32
-            )
-            y_train = trainable["Target"].to_numpy(
-                dtype=np.int8
-            )
-            X_latest = latest_features[FEATURE_COLS].to_numpy(
-                dtype=np.float32
-            )
+            X_train = trainable[FEATURE_COLS].to_numpy(dtype=np.float32)
+            y_train = trainable["Target"].to_numpy(dtype=np.int8)
+            X_latest = latest_features[FEATURE_COLS].to_numpy(dtype=np.float32)
 
-            # 상승 확률 분류 모델
+            # 분류 모델 (상승 확률 예측)
             model = create_model()
             model.fit(X_train, y_train)
-
             class_index = list(model.classes_).index(1)
-
-            up_prob = float(
-                model.predict_proba(X_latest)[0][class_index]
-            )
-
+            up_prob = float(model.predict_proba(X_latest)[0][class_index])
             down_prob = 1.0 - up_prob
 
-
-            # 예상 수익률 회귀 모델
+            # 회귀 모델 (수익률 예측)
             return_model = create_return_model()
-
-            y_return = trainable["Target_Return"].to_numpy(
-                dtype=np.float32
-            )
-
+            y_return = trainable["Target_Return"].to_numpy(dtype=np.float32)
             return_model.fit(X_train, y_return)
-
-            expected_return = float(
-                return_model.predict(X_latest)[0]
-            )
-
-            expected_return = float(
-                np.clip(expected_return, -1.0, 1.0)
-            )
+            expected_return = float(return_model.predict(X_latest)[0])
+            expected_return = float(np.clip(expected_return, -1.0, 1.0))
 
             holding = ticker in HOLDINGS
             if holding and up_prob <= SELL_THRESHOLD:
@@ -580,22 +595,16 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
                 "Name": name,
                 "Market": market,
                 "Date": latest_date.strftime("%Y-%m-%d"),
-                "Close": int(df.loc[latest_date, "Close"]),
-
-                # 상승 및 하락 확률
+                "Close": float(df.loc[latest_date, "Close"]),
                 "Up_Probability": round(up_prob, 4),
                 "Down_Probability": round(down_prob, 4),
-
-                # 예상 수익률
                 "Expected_Return": round(expected_return, 6),
                 "Expected_Return_Pct": round(expected_return * 100, 2),
-
                 "Holding": holding,
                 "Signal": signal,
                 "Training_Data": len(trainable)
             }
 
-            # 선택적으로 백테스트 실행
             if RUN_BACKTEST:
                 backtest = get_cached_backtest(ticker, trainable)
                 if backtest is not None and not backtest.empty:
@@ -615,87 +624,12 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
 
         time.sleep(REQUEST_DELAY)
 
-    # 최신 신호 저장
     if signal_dict:
         signals = pd.DataFrame(list(signal_dict.values()))
-        signals["Ticker"] = signals["Ticker"].astype(str).str.zfill(6)
-        signals = signals.sort_values(
-            "Up_Probability", ascending=False
-        )
+        signals = signals.sort_values("Up_Probability", ascending=False)
         save_csv_safely(signals, SIGNALS_FILE)
 
-    # 백테스트 결과 저장
-    if RUN_BACKTEST and backtest_results:
-        all_backtests = pd.concat(backtest_results).sort_index()
-        stock_metrics = []
-
-        for ticker, group in all_backtests.groupby("Ticker"):
-            group = group.sort_index()
-
-            equity = INITIAL_CASH * (
-                1 + group["AI_Return"]
-            ).cumprod()
-            buyhold_equity = INITIAL_CASH * (
-                1 + group["BuyHold_Return"]
-            ).cumprod()
-
-            drawdown = equity / equity.cummax() - 1
-            prediction = (
-                group["Probability"] >= BUY_THRESHOLD
-            ).astype(int)
-
-            stock_metrics.append({
-                "Ticker": ticker,
-                "Name": group["Name"].iloc[0],
-                "Market": group["Market"].iloc[0],
-                "AI_Return": round(
-                    equity.iloc[-1] / INITIAL_CASH - 1, 4
-                ),
-                "BuyHold_Return": round(
-                    buyhold_equity.iloc[-1] / INITIAL_CASH - 1, 4
-                ),
-                "MDD": round(drawdown.min(), 4),
-                "Accuracy": round(
-                    accuracy_score(group["Actual"], prediction), 4
-                ),
-                "Precision": round(
-                    precision_score(
-                        group["Actual"], prediction, zero_division=0
-                    ), 4
-                ),
-                "Recall": round(
-                    recall_score(
-                        group["Actual"], prediction, zero_division=0
-                    ), 4
-                ),
-                "Trading_Days": int(
-                    (group["Position"] > 0).sum()
-                )
-            })
-
-        save_csv_safely(
-            pd.DataFrame(stock_metrics),
-            BACKTEST_METRICS_FILE
-        )
-
-        # 종목별 수익률을 날짜별 평균하여 간단한 포트폴리오 곡선 생성
-        portfolio = (
-            all_backtests.groupby(level=0)["AI_Return"]
-            .mean()
-            .sort_index()
-        )
-
-        portfolio_df = pd.DataFrame({
-            "Date": portfolio.index,
-            "AI_Return": portfolio.values,
-            "Equity": (
-                INITIAL_CASH * (1 + portfolio).cumprod()
-            ).values
-        })
-
-        save_csv_safely(portfolio_df, PORTFOLIO_FILE)
-
-    print("\n완료! 결과 폴더:", OUTPUT_DIR.resolve())
+    print("\n분석 완료! 결과 폴더:", OUTPUT_DIR.resolve())
 
 
 # =========================================================
@@ -703,29 +637,15 @@ def run_analysis_pipeline(max_stocks=MAX_STOCKS):
 # =========================================================
 def git_auto_push():
     print("\nGitHub 결과 업로드 시작")
-
     try:
-        subprocess.run(
-            ["git", "add", "multi_stock_results/results/"],
-            check=True
-        )
-
+        subprocess.run(["git", "add", "multi_stock_results/results/"], check=True)
         today = datetime.now().strftime("%Y-%m-%d")
         subprocess.run(
-            [
-                "git", "commit", "--allow-empty",
-                "-m", f"Auto-update stock analysis results: {today}"
-            ],
+            ["git", "commit", "--allow-empty", "-m", f"Auto-update stock analysis results (KR+US): {today}"],
             check=True
         )
-
-        subprocess.run(
-            ["git", "push", "origin", "main"],
-            check=True
-        )
-
+        subprocess.run(["git", "push", "origin", "main"], check=True)
         print("GitHub 업로드 완료")
-
     except subprocess.CalledProcessError as error:
         print(f"GitHub 업로드 오류: {error}")
 
